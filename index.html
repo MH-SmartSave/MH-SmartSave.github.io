@@ -6,9 +6,11 @@
     
     <link rel="manifest" href="./manifest.json">
     <meta name="theme-color" content="#0f172a">
-    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/1006/1006771.png">
     
-    <title>Link Manager Pro - Clean Start</title>
+    <link rel="icon" type="image/png" href="./icon.png">
+    <link rel="apple-touch-icon" href="./icon.png">
+    
+    <title>Link Manager Pro</title>
     <style>
         :root {
             --bg-gradient: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);
@@ -1018,7 +1020,6 @@
         function toggleDuplicates() { state.showDuplicates=!state.showDuplicates; renderList(); }
 
         // --- רישום Service Worker ---
-        // קוד זה נוסף כדי להפוך את האפליקציה ל-PWA
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('./sw.js')
