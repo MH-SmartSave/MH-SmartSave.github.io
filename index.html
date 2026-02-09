@@ -118,12 +118,15 @@
         .progress-bar { height: 4px; background: var(--accent-green); width: 100%; transform-origin: left; }
         @keyframes countdown { from { transform: scaleX(1); } to { transform: scaleX(0); } }
         .animate-progress { animation: countdown 10s linear forwards; }
+        
+        .loader { border: 3px solid #f3f3f3; border-top: 3px solid #3498db; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; margin-left: 10px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body class="dark-mode">
 
     <header>
-        <h1>Link Manager Pro</h1>
+        <h1>Link Manager Pro <span id="mainLoader" class="loader" style="display:none"></span></h1>
         <div id="itemCount">טוען...</div>
     </header>
 
@@ -184,9 +187,7 @@
     <div id="toast">
         <div style="padding:15px; display:flex; justify-content:space-between; align-items:center;">
             <span id="toastMsg">הודעה</span>
-            <button id="undoBtn" style="background:none; border:1px solid gold; color:gold; cursor:pointer; padding:4px 8px; border-radius:4px">בטל</button>
         </div>
-        <div id="toastProgress" class="progress-bar"></div>
     </div>
 
     <script type="module">
@@ -203,7 +204,7 @@
             appId: "1:532683691813:web:5cf639e32a715c626eeccc"
         };
 
-        const STORAGE_KEY = 'LinkManager_Pro_V7';
+        const STORAGE_KEY = 'LinkManager_Pro_V8';
         const state = { items: [], trash: [], user: null, unsubscribe: null };
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
@@ -235,24 +236,37 @@
                     updateSyncStatus('syncing');
                     if (state.unsubscribe) state.unsubscribe();
 
-                    state.unsubscribe = onSnapshot(doc(db, "users", user.uid), (docSnap) => {
+                    // --- לוגיקת סנכרון בזמן אמת כמו בארנק ---
+                    const docRef = doc(db, "users", user.uid);
+                    state.unsubscribe = onSnapshot(docRef, (docSnap) => {
+                        document.getElementById('mainLoader').style.display = 'none';
+                        
                         if (docSnap.exists()) {
+                            // הענן הוא הקובע
                             const d = docSnap.data();
                             state.items = d.items || [];
                             state.trash = d.trash || [];
-                            saveData(true);
+                            
+                            // עדכון מטמון מקומי
+                            localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: state.items, trash: state.trash }));
+                            
+                            renderList();
+                            updateSyncStatus('online');
                         } else {
-                            state.items = [];
-                            state.trash = [];
-                            saveData(true);
-                            pushToCloud();
-                            showToast("חשבון חדש הוגדר");
+                            // משתמש חדש - ניצור מסמך ריק
+                            saveToFirestore(true).catch(console.error);
                         }
-                        renderList();
-                        updateSyncStatus('online');
-                    }, () => updateSyncStatus('error'));
+                    }, (error) => {
+                        console.error("Sync error:", error);
+                        updateSyncStatus('error');
+                        // במקרה של שגיאה בהרשאות - נראה הודעה ברורה
+                        if(error.code === 'permission-denied') {
+                            alert("שגיאת הרשאות! אנא עדכן את ה-Rules במסוף של Firebase כפי שהוסבר.");
+                        }
+                    });
                 } else {
                     state.user = null;
+                    if(state.unsubscribe) state.unsubscribe();
                     loggedInView.style.display = 'none';
                     loggedOutView.style.display = 'flex';
                     loadLocalData();
@@ -261,17 +275,32 @@
             });
         }
 
-        async function pushToCloud() {
-            if (!state.user) return;
+        // פונקציית שמירה מרכזית - כותבת לענן ומעדכנת מקומית
+        async function saveToFirestore(isInit = false) {
+            if (!state.user) {
+                // אם לא מחובר, שומר רק מקומית
+                localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: state.items, trash: state.trash }));
+                return;
+            }
+
             updateSyncStatus('syncing');
             try {
+                // שמירה לענן עם merge למניעת דריסת שדות אחרים
                 await setDoc(doc(db, "users", state.user.uid), {
                     items: state.items,
                     trash: state.trash,
                     lastUpdated: new Date().toISOString()
-                });
-                updateSyncStatus('online');
-            } catch (e) { updateSyncStatus('error'); }
+                }, { merge: true });
+                
+                // עדכון מטמון
+                localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: state.items, trash: state.trash }));
+                
+                if(!isInit) updateSyncStatus('online');
+            } catch (e) { 
+                console.error("Save failed:", e);
+                updateSyncStatus('error');
+                alert("שגיאה בשמירה לענן: " + e.message);
+            }
         }
 
         function loadLocalData() {
@@ -283,21 +312,37 @@
             }
         }
 
-        function saveData(skipCloud = false) {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: state.items, trash: state.trash }));
-            if (!skipCloud && state.user) pushToCloud();
-        }
-
         function renderList() {
             const container = document.getElementById('listContainer');
             const query = document.getElementById('searchInput').value.toLowerCase();
-            container.innerHTML = '';
+            const catFilter = document.getElementById('categoryFilter').value;
+            const sortMode = document.getElementById('sortOrder').value;
 
-            const filtered = state.items.filter(i => 
-                i.content.toLowerCase().includes(query) || 
+            container.innerHTML = '';
+            
+            // עדכון רשימת קטגוריות
+            const categories = [...new Set(state.items.map(i => i.category))];
+            const catSelect = document.getElementById('categoryFilter');
+            // שמירת הבחירה הנוכחית
+            const currentCat = catSelect.value;
+            catSelect.innerHTML = '<option value="">📂 כל הקטגוריות</option>';
+            categories.forEach(c => {
+                if(c) catSelect.innerHTML += `<option value="${c}">${c}</option>`;
+            });
+            catSelect.value = currentCat;
+
+            let filtered = state.items.filter(i => 
+                (i.content.toLowerCase().includes(query) || 
                 i.description.toLowerCase().includes(query) ||
-                i.category.toLowerCase().includes(query)
+                i.category.toLowerCase().includes(query)) &&
+                (catFilter === "" || i.category === catFilter)
             );
+
+            // מיון
+            filtered.sort((a, b) => {
+                if (sortMode === 'name') return a.description.localeCompare(b.description);
+                return new Date(b.date) - new Date(a.date); // ברירת מחדל: חדש לישן
+            });
 
             document.getElementById('itemCount').textContent = `${filtered.length} פריטים`;
 
@@ -305,40 +350,92 @@
                 const card = document.createElement('div');
                 card.className = `card glass-panel ${item.isPinned ? 'pinned' : ''}`;
                 card.style.marginBottom = '15px';
+                
+                // זיהוי אם זה לינק
+                const isUrl = item.content.startsWith('http');
+                const contentDisplay = isUrl ? 
+                    `<a href="${item.content}" target="_blank" class="card-link" style="color:var(--primary-color)">${item.description || item.content}</a>` :
+                    `<div class="card-link" style="color:var(--text-primary)">${item.content}</div>`;
+
                 card.innerHTML = `
-                    <div class="card-body">
-                        <a href="${item.content}" target="_blank" class="card-link">${item.content}</a>
-                        <div style="font-size:0.9rem; opacity:0.8">${item.description}</div>
-                        <div style="margin-top:10px; font-size:0.8rem; background:rgba(127,127,127,0.1); display:inline-block; padding:2px 8px; border-radius:10px">${item.category}</div>
+                    <div class="card-body" style="padding:15px">
+                        ${contentDisplay}
+                        ${isUrl && item.description ? `<div style="font-size:0.85rem; opacity:0.7; margin-top:5px; word-break:break-all">${item.content}</div>` : ''}
+                        
+                        <div style="margin-top:12px; display:flex; justify-content:space-between; align-items:flex-end">
+                            <span style="font-size:0.75rem; background:rgba(127,127,127,0.15); padding:3px 8px; border-radius:6px; color:var(--text-secondary)">
+                                ${item.category}
+                            </span>
+                            <span style="font-size:0.7rem; opacity:0.5">${new Date(item.date).toLocaleDateString()}</span>
+                        </div>
                     </div>
-                    <div style="padding:10px; border-top:1px solid var(--glass-border); display:flex; justify-content:flex-end; gap:10px">
-                        <button onclick="window.deleteItem(${item.id})" style="background:none; border:none; cursor:pointer">🗑️</button>
+                    <div style="padding:8px 15px; border-top:1px solid var(--glass-border); display:flex; justify-content:flex-end; gap:12px; background:rgba(0,0,0,0.02)">
+                        <button onclick="window.copyItem('${item.content}')" style="background:none; border:none; cursor:pointer; opacity:0.7" title="העתק">📋</button>
+                        <button onclick="window.deleteItem(${item.id})" style="background:none; border:none; cursor:pointer; opacity:0.7; color:#ef4444" title="מחק">🗑️</button>
                     </div>
                 `;
                 container.appendChild(card);
             });
+            
+            if(filtered.length === 0) {
+                container.innerHTML = `<div style="text-align:center; padding:40px; opacity:0.5">לא נמצאו פריטים</div>`;
+            }
         }
 
         function setupEventListeners() {
             document.getElementById('googleLoginBtn').onclick = () => signInWithPopup(auth, new GoogleAuthProvider());
-            document.getElementById('logoutBtn').onclick = () => signOut(auth);
-            document.getElementById('addItemForm').onsubmit = (e) => {
+            
+            document.getElementById('logoutBtn').onclick = () => {
+                signOut(auth);
+                state.items = [];
+                renderList();
+            };
+            
+            document.getElementById('switchAccountBtn').onclick = async () => {
+                await signOut(auth);
+                const provider = new GoogleAuthProvider();
+                provider.setCustomParameters({ prompt: 'select_account' });
+                signInWithPopup(auth, provider);
+            };
+
+            document.getElementById('addItemForm').onsubmit = async (e) => {
                 e.preventDefault();
+                const btn = e.target.querySelector('button');
+                btn.disabled = true;
+                btn.textContent = 'שומר...';
+
                 const content = document.getElementById('itemContent').value;
-                state.items.unshift({
+                const newItem = {
                     id: Date.now(),
                     content,
-                    description: document.getElementById('itemDescription').value,
+                    description: document.getElementById('itemDescription').value || '',
                     category: document.getElementById('itemCategory').value || 'כללי',
                     date: new Date().toISOString(),
                     isPinned: false
-                });
-                saveData();
+                };
+                
+                // עדכון אופטימי
+                state.items.unshift(newItem);
                 renderList();
                 e.target.reset();
+                document.querySelector('details').removeAttribute('open');
+                
+                // שמירה לענן
+                await saveToFirestore();
+                
+                btn.disabled = false;
+                btn.textContent = 'הוסף למאגר';
+                showToast("הפריט נוסף בהצלחה");
             };
+
             document.getElementById('searchInput').oninput = renderList;
+            document.getElementById('categoryFilter').onchange = renderList;
+            document.getElementById('sortOrder').onchange = renderList;
             
+            document.getElementById('toggleDarkModeBtn').onclick = () => {
+                document.body.classList.toggle('dark-mode');
+            };
+
             document.querySelectorAll('.drop-trigger').forEach(btn => {
                 btn.onclick = (e) => {
                     e.stopPropagation();
@@ -346,26 +443,78 @@
                     menu.classList.toggle('show');
                 };
             });
+            
             window.onclick = () => document.querySelectorAll('.dropdown-content').forEach(m => m.classList.remove('show'));
+            
+            // ייצוא וייבוא JSON
+            document.getElementById('exportJsonBtn').onclick = () => {
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(state.items));
+                const downloadAnchorNode = document.createElement('a');
+                downloadAnchorNode.setAttribute("href", dataStr);
+                downloadAnchorNode.setAttribute("download", "link_manager_backup.json");
+                document.body.appendChild(downloadAnchorNode);
+                downloadAnchorNode.click();
+                downloadAnchorNode.remove();
+            };
+
+            document.getElementById('importJsonInput').onchange = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    try {
+                        const imported = JSON.parse(event.target.result);
+                        if (Array.isArray(imported)) {
+                            // מיזוג חכם
+                            const currentIds = new Set(state.items.map(i => i.id));
+                            const newItems = imported.filter(i => !currentIds.has(i.id));
+                            state.items = [...newItems, ...state.items];
+                            await saveToFirestore();
+                            renderList();
+                            showToast(`יובאו ${newItems.length} פריטים`);
+                        }
+                    } catch (err) {
+                        alert("קובץ לא תקין");
+                    }
+                };
+                reader.readAsText(file);
+            };
         }
 
-        window.deleteItem = (id) => {
+        window.deleteItem = async (id) => {
+            if(!confirm("להעביר לסל המחזור?")) return;
+            
             const idx = state.items.findIndex(i => i.id === id);
             if (idx > -1) {
                 const item = state.items.splice(idx, 1)[0];
                 state.trash.push(item);
-                saveData();
+                
+                // עדכון אופטימי
                 renderList();
                 showToast("הועבר לסל המחזור");
+                
+                // שמירה
+                await saveToFirestore();
             }
         };
+
+        window.copyItem = (text) => {
+            navigator.clipboard.writeText(text);
+            showToast("הועתק ללוח!");
+        }
 
         function updateSyncStatus(status) {
             const el = document.getElementById('syncStatus');
             if (!el) return;
             const dot = el.querySelector('.status-dot');
             dot.className = `status-dot ${status}`;
-            el.innerHTML = `<span class="status-dot ${status}"></span> ${status === 'online' ? 'סונכרן' : status === 'syncing' ? 'מסנכרן...' : 'שגיאה'}`;
+            
+            let text = 'מנותק';
+            if(status === 'online') text = 'מגובה בענן';
+            if(status === 'syncing') text = 'מסנכרן...';
+            if(status === 'error') text = 'שגיאת סנכרון';
+            
+            el.innerHTML = `<span class="status-dot ${status}"></span> ${text}`;
         }
 
         function showToast(msg) {
