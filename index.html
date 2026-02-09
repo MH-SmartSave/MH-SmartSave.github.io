@@ -204,7 +204,7 @@
             appId: "1:532683691813:web:5cf639e32a715c626eeccc"
         };
 
-        const STORAGE_KEY = 'LinkManager_Pro_V8';
+        const STORAGE_KEY = 'LinkManager_Pro_V9';
         const state = { items: [], trash: [], user: null, unsubscribe: null };
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
@@ -236,13 +236,13 @@
                     updateSyncStatus('syncing');
                     if (state.unsubscribe) state.unsubscribe();
 
-                    // --- לוגיקת סנכרון בזמן אמת כמו בארנק ---
+                    // --- האזנה חכמה לענן: שומרת רק את הנתונים שלך ---
                     const docRef = doc(db, "users", user.uid);
                     state.unsubscribe = onSnapshot(docRef, (docSnap) => {
                         document.getElementById('mainLoader').style.display = 'none';
                         
                         if (docSnap.exists()) {
-                            // הענן הוא הקובע
+                            // הנתונים קיימים בענן - נטען אותם (זה המקור הקובע)
                             const d = docSnap.data();
                             state.items = d.items || [];
                             state.trash = d.trash || [];
@@ -252,16 +252,19 @@
                             
                             renderList();
                             updateSyncStatus('online');
+                            console.log("Loaded data from cloud");
                         } else {
-                            // משתמש חדש - ניצור מסמך ריק
+                            // מסמך לא קיים = משתמש חדש לגמרי
+                            // ניצור מסמך ריק כדי להתחיל
+                            console.log("New user detected, creating doc...");
                             saveToFirestore(true).catch(console.error);
                         }
                     }, (error) => {
                         console.error("Sync error:", error);
                         updateSyncStatus('error');
-                        // במקרה של שגיאה בהרשאות - נראה הודעה ברורה
+                        // הודעה ברורה למשתמש אם החוקים לא עודכנו
                         if(error.code === 'permission-denied') {
-                            alert("שגיאת הרשאות! אנא עדכן את ה-Rules במסוף של Firebase כפי שהוסבר.");
+                            alert("שגיאת הרשאות! נראה שחוקי האבטחה (Rules) במסוף Firebase לא עודכנו.\nאנא בצע את שלב 1 בהוראות.");
                         }
                     });
                 } else {
@@ -269,6 +272,7 @@
                     if(state.unsubscribe) state.unsubscribe();
                     loggedInView.style.display = 'none';
                     loggedOutView.style.display = 'flex';
+                    // ביציאה - חוזרים למידע מקומי בלבד
                     loadLocalData();
                     renderList();
                 }
@@ -283,9 +287,9 @@
                 return;
             }
 
-            updateSyncStatus('syncing');
+            if(!isInit) updateSyncStatus('syncing');
             try {
-                // שמירה לענן עם merge למניעת דריסת שדות אחרים
+                // שמירה לענן עם merge למניעת דריסת שדות אחרים אם יהיו בעתיד
                 await setDoc(doc(db, "users", state.user.uid), {
                     items: state.items,
                     trash: state.trash,
@@ -299,7 +303,7 @@
             } catch (e) { 
                 console.error("Save failed:", e);
                 updateSyncStatus('error');
-                alert("שגיאה בשמירה לענן: " + e.message);
+                // לא מציגים אלרט על כל שמירה שנכשלת כדי לא להציק, אבל מסמנים באדום למעלה
             }
         }
 
@@ -320,16 +324,18 @@
 
             container.innerHTML = '';
             
-            // עדכון רשימת קטגוריות
+            // עדכון רשימת קטגוריות דינמי
             const categories = [...new Set(state.items.map(i => i.category))];
             const catSelect = document.getElementById('categoryFilter');
-            // שמירת הבחירה הנוכחית
             const currentCat = catSelect.value;
-            catSelect.innerHTML = '<option value="">📂 כל הקטגוריות</option>';
-            categories.forEach(c => {
-                if(c) catSelect.innerHTML += `<option value="${c}">${c}</option>`;
+            
+            // בניה מחדש של ה-Select אבל מנסים לשמור על הבחירה
+            let optionsHTML = '<option value="">📂 כל הקטגוריות</option>';
+            categories.filter(c => c).sort().forEach(c => {
+                optionsHTML += `<option value="${c}">${c}</option>`;
             });
-            catSelect.value = currentCat;
+            catSelect.innerHTML = optionsHTML;
+            if (categories.includes(currentCat)) catSelect.value = currentCat;
 
             let filtered = state.items.filter(i => 
                 (i.content.toLowerCase().includes(query) || 
@@ -340,7 +346,7 @@
 
             // מיון
             filtered.sort((a, b) => {
-                if (sortMode === 'name') return a.description.localeCompare(b.description);
+                if (sortMode === 'name') return (a.description || a.content).localeCompare(b.description || b.content);
                 return new Date(b.date) - new Date(a.date); // ברירת מחדל: חדש לישן
             });
 
@@ -351,16 +357,18 @@
                 card.className = `card glass-panel ${item.isPinned ? 'pinned' : ''}`;
                 card.style.marginBottom = '15px';
                 
-                // זיהוי אם זה לינק
-                const isUrl = item.content.startsWith('http');
+                // זיהוי חכם אם זה לינק
+                const isUrl = item.content.trim().match(/^(http|https):\/\/[^ "]+$/);
+                
                 const contentDisplay = isUrl ? 
                     `<a href="${item.content}" target="_blank" class="card-link" style="color:var(--primary-color)">${item.description || item.content}</a>` :
-                    `<div class="card-link" style="color:var(--text-primary)">${item.content}</div>`;
+                    `<div class="card-link" style="color:var(--text-primary); cursor:pointer" onclick="window.copyItem('${item.content}')">${item.content}</div>`;
 
                 card.innerHTML = `
                     <div class="card-body" style="padding:15px">
                         ${contentDisplay}
-                        ${isUrl && item.description ? `<div style="font-size:0.85rem; opacity:0.7; margin-top:5px; word-break:break-all">${item.content}</div>` : ''}
+                        ${isUrl && item.description ? `<div style="font-size:0.85rem; opacity:0.7; margin-top:5px; word-break:break-all" dir="ltr">${item.content}</div>` : ''}
+                        ${!isUrl && item.description ? `<div style="font-size:0.85rem; opacity:0.7; margin-top:5px">${item.description}</div>` : ''}
                         
                         <div style="margin-top:12px; display:flex; justify-content:space-between; align-items:flex-end">
                             <span style="font-size:0.75rem; background:rgba(127,127,127,0.15); padding:3px 8px; border-radius:6px; color:var(--text-secondary)">
@@ -387,8 +395,7 @@
             
             document.getElementById('logoutBtn').onclick = () => {
                 signOut(auth);
-                state.items = [];
-                renderList();
+                // לא מוחקים את state.items כאן כדי להשאיר תצוגה, אבל היא תתחלף ב-local ב-onAuthStateChanged
             };
             
             document.getElementById('switchAccountBtn').onclick = async () => {
@@ -414,13 +421,13 @@
                     isPinned: false
                 };
                 
-                // עדכון אופטימי
+                // עדכון אופטימי (מציג מיד למשתמש)
                 state.items.unshift(newItem);
                 renderList();
                 e.target.reset();
                 document.querySelector('details').removeAttribute('open');
                 
-                // שמירה לענן
+                // שמירה לענן ברקע
                 await saveToFirestore();
                 
                 btn.disabled = false;
@@ -465,7 +472,7 @@
                     try {
                         const imported = JSON.parse(event.target.result);
                         if (Array.isArray(imported)) {
-                            // מיזוג חכם
+                            // מיזוג חכם: מוסיף רק מה שאין לו אותו ID
                             const currentIds = new Set(state.items.map(i => i.id));
                             const newItems = imported.filter(i => !currentIds.has(i.id));
                             state.items = [...newItems, ...state.items];
